@@ -1,17 +1,30 @@
-/* Modern Eisenhower Matrix
- * Features: dark mode, drag & drop, search, counts, overdue highlight, PWA
- */
-const STORAGE_KEY = 'eisenhower_tasks_v2';
+// app.js  (Firebase sync version)
+// Uses Firestore instead of localStorage.
+
+import { watchTasks, addTaskRemote, updateTaskRemote, deleteTaskRemote } from "./firebase.js";
+
 const THEME_KEY = 'eisenhower_theme';
+let tasks = [];
 
-function loadTasks() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
-  catch { return []; }
+/* ---------- THEME ---------- */
+function applyTheme(){
+  const pref = localStorage.getItem(THEME_KEY);
+  if(pref === 'dark') document.documentElement.classList.add('dark');
+  else if(pref === 'light') document.documentElement.classList.remove('dark');
 }
-function saveTasks(tasks) { localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks)); }
+applyTheme();
+document.getElementById('theme-toggle').addEventListener('click', ()=>{
+  const isDark = document.documentElement.classList.toggle('dark');
+  localStorage.setItem(THEME_KEY, isDark ? 'dark':'light');
+});
 
-function generateId(){ return 't_'+crypto.randomUUID(); }
+/* ---------- FIRESTORE LISTENER ---------- */
+watchTasks(remoteTasks => {
+  tasks = remoteTasks;
+  render();
+});
 
+/* ---------- HELPERS ---------- */
 function getQuadrant(task){
   if(task.urgent && task.important) return 'q1';
   if(!task.urgent && task.important) return 'q2';
@@ -19,26 +32,14 @@ function getQuadrant(task){
   return 'q4';
 }
 
-function applyTheme(){
-  const pref = localStorage.getItem(THEME_KEY);
-  if(pref === 'dark') document.documentElement.classList.add('dark');
-  else if(pref === 'light') document.documentElement.classList.remove('dark');
-  else {
-    // System default handled by CSS
-  }
-}
-applyTheme();
-
 const searchInput = document.getElementById('search');
 searchInput.addEventListener('input', render);
 
-document.getElementById('theme-toggle').addEventListener('click', ()=>{
-  const isDark = document.documentElement.classList.toggle('dark');
-  localStorage.setItem(THEME_KEY, isDark ? 'dark':'light');
-});
+function span(text){ const s=document.createElement('span'); s.textContent=text; return s; }
+function button(text,cls,handler){ const b=document.createElement('button'); b.textContent=text; b.className=cls; b.type='button'; b.onclick=handler; return b; }
 
+/* ---------- RENDER ---------- */
 function render(){
-  const tasks = loadTasks();
   const filter = searchInput.value.toLowerCase();
   const counts = {q1:{total:0,done:0}, q2:{total:0,done:0}, q3:{total:0,done:0}, q4:{total:0,done:0}};
   ['q1','q2','q3','q4'].forEach(q=>document.getElementById(q).innerHTML='');
@@ -48,10 +49,11 @@ function render(){
     return (a.dueDate||'').localeCompare(b.dueDate||'');
   });
 
-  const now = new Date().toISOString().split('T')[0];
+  const today = new Date().toISOString().split('T')[0];
 
   tasks.forEach(task=>{
     if(filter && !task.title.toLowerCase().includes(filter) && !task.description.toLowerCase().includes(filter)) return;
+
     const q = getQuadrant(task);
     counts[q].total++;
     if(task.done) counts[q].done++;
@@ -59,54 +61,41 @@ function render(){
     const li = document.createElement('li');
     li.className = 'task-item';
     if(task.done) li.classList.add('completed');
-    if(task.dueDate && task.dueDate < now) li.classList.add('overdue');
-
-    li.setAttribute('draggable','true');
+    if(task.dueDate && task.dueDate < today) li.classList.add('overdue');
     li.dataset.id = task.id;
-
-    li.addEventListener('dragstart', e=>{
-      li.classList.add('dragging');
-      e.dataTransfer.setData('text/plain', task.id);
-    });
-    li.addEventListener('dragend', ()=>li.classList.remove('dragging'));
 
     const title = document.createElement('strong');
     title.textContent = task.title;
     li.appendChild(title);
 
     if(task.description){
-      const desc = document.createElement('div');
-      desc.textContent = task.description;
-      desc.className = 'desc';
-      li.appendChild(desc);
+      const d = document.createElement('div');
+      d.className = 'desc';
+      d.textContent = task.description;
+      li.appendChild(d);
     }
 
     const meta = document.createElement('div');
     meta.className = 'meta';
-    if(task.dueDate) {
-      const due = document.createElement('span');
-      due.textContent = 'Due '+task.dueDate;
-      meta.appendChild(due);
-    }
-    meta.appendChild(badge(task.important?'Important':'Not Important'));
-    meta.appendChild(badge(task.urgent?'Urgent':'Not Urgent'));
+    if(task.dueDate) meta.appendChild(span('Due '+task.dueDate));
+    meta.appendChild(span(task.important?'Important':'Not Important'));
+    meta.appendChild(span(task.urgent?'Urgent':'Not Urgent'));
     li.appendChild(meta);
 
     const actions = document.createElement('div');
     actions.className = 'actions';
-
-    const toggleBtn = button(task.done?'Undo':'Done','toggle',()=>{
-      task.done = !task.done; updateTask(task);
-    });
-    const editBtn = button('Edit','edit',()=>fillForm(task));
-    const delBtn = button('Delete','delete',()=>{
-      if(confirm('Delete this task?')) deleteTask(task.id);
-    });
-
-    actions.appendChild(toggleBtn);
-    actions.appendChild(editBtn);
-    actions.appendChild(delBtn);
+    actions.appendChild(button(task.done?'Undo':'Done','toggle',()=>toggleDone(task)));
+    actions.appendChild(button('Edit','edit',()=>fillForm(task)));
+    actions.appendChild(button('Delete','delete',()=>removeTask(task.id)));
     li.appendChild(actions);
+
+    // Drag support
+    li.draggable = true;
+    li.addEventListener('dragstart', e=>{
+      e.dataTransfer.setData('text/plain', task.id);
+      li.classList.add('dragging');
+    });
+    li.addEventListener('dragend', ()=>li.classList.remove('dragging'));
 
     document.getElementById(q).appendChild(li);
   });
@@ -116,45 +105,29 @@ function render(){
   });
 }
 
-function badge(text){
-  const span = document.createElement('span');
-  span.textContent = text;
-  return span;
+/* ---------- CRUD ---------- */
+async function addTask(task){
+  await addTaskRemote(task); // Firestore generates id
 }
-function button(text,cls,handler){
-  const b = document.createElement('button');
-  b.textContent = text;
-  b.className = cls;
-  b.type = 'button';
-  b.addEventListener('click', handler);
-  return b;
-}
-
-function addTask(task){
-  const tasks = loadTasks();
-  tasks.push(task);
-  saveTasks(tasks);
-  render();
-}
-
-function updateTask(updated){
-  const tasks = loadTasks().map(t=>t.id===updated.id?updated:t);
-  saveTasks(tasks);
-  render();
+async function updateTask(task){
+  await updateTaskRemote(task);
   resetForm();
 }
-
-function deleteTask(id){
-  const tasks = loadTasks().filter(t=>t.id!==id);
-  saveTasks(tasks);
-  render();
+async function removeTask(id){
+  if(confirm('Delete this task?')) await deleteTaskRemote(id);
+}
+async function toggleDone(task){
+  task.done = !task.done;
+  await updateTaskRemote(task);
 }
 
+/* ---------- FORM ---------- */
 function resetForm(){
   document.getElementById('task-form').reset();
   document.getElementById('task-id').value='';
   document.getElementById('save-btn').textContent='Save Task';
 }
+document.getElementById('reset-btn').addEventListener('click', resetForm);
 
 function fillForm(task){
   document.getElementById('task-id').value = task.id;
@@ -167,90 +140,58 @@ function fillForm(task){
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
-document.getElementById('task-form').addEventListener('submit', e=>{
+document.getElementById('task-form').addEventListener('submit', async e=>{
   e.preventDefault();
   const idField = document.getElementById('task-id');
+  const existing = tasks.find(t=>t.id===idField.value);
   const task = {
-    id: idField.value || generateId(),
+    id: existing ? existing.id : undefined,
     title: document.getElementById('title').value.trim(),
     description: document.getElementById('description').value.trim(),
     dueDate: document.getElementById('due-date').value,
     important: document.getElementById('important').checked,
     urgent: document.getElementById('urgent').checked,
-    done:false
+    done: existing ? existing.done : false
   };
   if(!task.title){ alert('Title required'); return; }
-  if(idField.value){
-    const existing = loadTasks().find(t=>t.id===task.id);
-    task.done = existing.done;
-    updateTask(task);
-  } else {
-    addTask(task);
-  }
+  if(existing) await updateTask(task); else await addTask(task);
   resetForm();
 });
-document.getElementById('reset-btn').addEventListener('click', resetForm);
 
-// Drag & Drop handlers for quadrants
+/* ---------- DRAG & DROP QUADRANTS ---------- */
 document.querySelectorAll('.quadrant').forEach(q=>{
-  q.addEventListener('dragover', e=>{
-    e.preventDefault();
-    q.classList.add('drag-over');
-  });
+  q.addEventListener('dragover', e=>{ e.preventDefault(); q.classList.add('drag-over'); });
   q.addEventListener('dragleave', ()=>q.classList.remove('drag-over'));
-  q.addEventListener('drop', e=>{
+  q.addEventListener('drop', async e=>{
     e.preventDefault();
     q.classList.remove('drag-over');
     const id = e.dataTransfer.getData('text/plain');
-    const tasks = loadTasks();
     const task = tasks.find(t=>t.id===id);
     if(!task) return;
-    // Set urgent/important based on target quadrant
     const quad = q.getAttribute('data-quadrant');
     if(quad==='q1'){ task.urgent=true; task.important=true; }
     if(quad==='q2'){ task.urgent=false; task.important=true; }
     if(quad==='q3'){ task.urgent=true; task.important=false; }
     if(quad==='q4'){ task.urgent=false; task.important=false; }
-    saveTasks(tasks);
-    render();
+    await updateTaskRemote(task);
   });
 });
 
+/* ---------- OTHER BUTTONS ---------- */
 document.getElementById('fab').addEventListener('click', ()=>{
-  resetForm();
-  document.getElementById('title').focus();
-  window.scrollTo({top:0,behavior:'smooth'});
+  resetForm(); document.getElementById('title').focus(); window.scrollTo({top:0,behavior:'smooth'});
 });
 
 document.getElementById('export-btn').addEventListener('click', ()=>{
-  const blob = new Blob([JSON.stringify(loadTasks(),null,2)],{type:'application/json'});
+  const blob = new Blob([JSON.stringify(tasks,null,2)],{type:'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'eisenhower_tasks_backup.json';
+  a.download = 'tasks_backup.json';
   a.click();
 });
-document.getElementById('import-file').addEventListener('change', e=>{
-  const file = e.target.files[0];
-  if(!file) return;
-  const reader = new FileReader();
-  reader.onload = evt=>{
-    try{
-      const imported = JSON.parse(evt.target.result);
-      if(!Array.isArray(imported)) throw new Error('Invalid format');
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(imported));
-      render();
-      alert('Imported successfully');
-    } catch(err){
-      alert('Import failed: '+ err.message);
-    }
-  };
-  reader.readAsText(file);
+document.getElementById('import-file').addEventListener('change', ()=>{
+  alert('Import not implemented for Firestore version yet.');
 });
 document.getElementById('clear-all').addEventListener('click', ()=>{
-  if(confirm('This will delete all tasks permanently. Continue?')){
-    localStorage.removeItem(STORAGE_KEY);
-    render();
-  }
+  alert('Delete tasks one by one for now.');
 });
-
-render();
