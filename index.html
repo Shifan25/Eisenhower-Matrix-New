@@ -112,6 +112,22 @@
 
 </body>
 </html>
-<script type="module" src="app.js"></script>
+  <script type="module" src="app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").catch(console.error);
+      });
+    }
+  </script>
+
+  <button id="mobile-reset" class="danger small" style="display:none;">Reset</button>
+  <script>
+    if (window.matchMedia("(max-width:680px)").matches) {
+      const btn = document.getElementById('mobile-reset');
+      btn.style.display='block';
+      btn.addEventListener('click', ()=>document.getElementById('clear-all').click());
+    }
+  </script>
 </body>
 </html>
